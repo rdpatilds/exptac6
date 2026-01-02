@@ -1,5 +1,6 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from datetime import datetime
 import os
 import sqlite3
@@ -7,6 +8,8 @@ import traceback
 from dotenv import load_dotenv
 import logging
 import sys
+import csv
+import io
 
 from core.data_models import (
     FileUploadResponse,
@@ -276,14 +279,14 @@ async def delete_table(table_name: str):
             validate_identifier(table_name, "table")
         except SQLSecurityError as e:
             raise HTTPException(400, str(e))
-        
+
         conn = sqlite3.connect("db/database.db")
-        
+
         # Check if table exists using secure method
         if not check_table_exists(conn, table_name):
             conn.close()
             raise HTTPException(404, f"Table '{table_name}' not found")
-        
+
         # Drop the table using safe query execution with DDL permission
         execute_query_safely(
             conn,
@@ -293,7 +296,7 @@ async def delete_table(table_name: str):
         )
         conn.commit()
         conn.close()
-        
+
         response = {"message": f"Table '{table_name}' deleted successfully"}
         logger.info(f"[SUCCESS] Table deleted: {table_name}")
         return response
@@ -303,6 +306,109 @@ async def delete_table(table_name: str):
         logger.error(f"[ERROR] Table deletion failed: {str(e)}")
         logger.error(f"[ERROR] Full traceback:\n{traceback.format_exc()}")
         raise HTTPException(500, f"Error deleting table: {str(e)}")
+
+@app.get("/api/table/{table_name}/export")
+async def export_table(table_name: str):
+    """Export a table's complete data as a CSV file"""
+    try:
+        # Validate table name using security module
+        try:
+            validate_identifier(table_name, "table")
+        except SQLSecurityError as e:
+            raise HTTPException(400, str(e))
+
+        conn = sqlite3.connect("db/database.db")
+
+        # Check if table exists using secure method
+        if not check_table_exists(conn, table_name):
+            conn.close()
+            raise HTTPException(404, f"Table '{table_name}' not found")
+
+        # Fetch all table data using safe query execution
+        cursor = execute_query_safely(
+            conn,
+            "SELECT * FROM {table}",
+            identifier_params={'table': table_name}
+        )
+
+        # Get column names
+        columns = [description[0] for description in cursor.description]
+        rows = cursor.fetchall()
+        conn.close()
+
+        # Generate CSV
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(columns)
+        writer.writerows(rows)
+
+        # Return as streaming response
+        csv_content = output.getvalue()
+        output.close()
+
+        logger.info(f"[SUCCESS] Table exported: {table_name}, rows={len(rows)}")
+
+        return StreamingResponse(
+            io.StringIO(csv_content),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="{table_name}.csv"'
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[ERROR] Table export failed: {str(e)}")
+        logger.error(f"[ERROR] Full traceback:\n{traceback.format_exc()}")
+        raise HTTPException(500, f"Error exporting table: {str(e)}")
+
+@app.post("/api/query/export")
+async def export_query_results(request: QueryRequest):
+    """Export query results as a CSV file"""
+    try:
+        # Get database schema
+        schema_info = get_database_schema()
+
+        # Generate SQL using routing logic
+        sql = generate_sql(request, schema_info)
+
+        # Execute SQL query
+        result = execute_sql_safely(sql)
+
+        if result['error']:
+            raise HTTPException(400, result['error'])
+
+        # Generate CSV
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # Write headers
+        columns = result['columns']
+        writer.writerow(columns)
+
+        # Write data rows
+        for row in result['results']:
+            writer.writerow([row.get(col, '') for col in columns])
+
+        # Return as streaming response
+        csv_content = output.getvalue()
+        output.close()
+
+        logger.info(f"[SUCCESS] Query results exported: SQL={sql}, rows={len(result['results'])}")
+
+        return StreamingResponse(
+            io.StringIO(csv_content),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": 'attachment; filename="query_results.csv"'
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[ERROR] Query export failed: {str(e)}")
+        logger.error(f"[ERROR] Full traceback:\n{traceback.format_exc()}")
+        raise HTTPException(500, f"Error exporting query results: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

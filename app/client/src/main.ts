@@ -2,6 +2,7 @@ import './style.css'
 import { api } from './api/client'
 
 // Global state
+let lastQueryRequest: QueryRequest | null = null;
 
 // Initialize app
 document.addEventListener('DOMContentLoaded', () => {
@@ -39,13 +40,17 @@ function initializeQueryInput() {
     queryButton.innerHTML = '<span class="loading"></span>';
     
     try {
-      const response = await api.processQuery({
+      const queryRequest: QueryRequest = {
         query,
         llm_provider: 'openai'  // Default to OpenAI
-      });
-      
+      };
+      const response = await api.processQuery(queryRequest);
+
+      // Store the last query request for export functionality
+      lastQueryRequest = queryRequest;
+
       displayResults(response, query);
-      
+
       // Clear the input field on success
       queryInput.value = '';
     } catch (error) {
@@ -182,13 +187,14 @@ async function loadDatabaseSchema() {
 
 // Display query results
 function displayResults(response: QueryResponse, query: string) {
-  
+
   const resultsSection = document.getElementById('results-section') as HTMLElement;
   const sqlDisplay = document.getElementById('sql-display') as HTMLDivElement;
   const resultsContainer = document.getElementById('results-container') as HTMLDivElement;
-  
+  const resultsHeader = resultsSection.querySelector('.results-header') as HTMLDivElement;
+
   resultsSection.style.display = 'block';
-  
+
   // Display natural language query and SQL
   sqlDisplay.innerHTML = `
     <div class="query-display">
@@ -198,7 +204,7 @@ function displayResults(response: QueryResponse, query: string) {
       <strong>SQL:</strong> <code>${response.sql}</code>
     </div>
   `;
-  
+
   // Display results table
   if (response.error) {
     resultsContainer.innerHTML = `<div class="error-message">${response.error}</div>`;
@@ -209,12 +215,69 @@ function displayResults(response: QueryResponse, query: string) {
     resultsContainer.innerHTML = '';
     resultsContainer.appendChild(table);
   }
-  
-  // Initialize toggle button
+
+  // Update results header with download button
   const toggleButton = document.getElementById('toggle-results') as HTMLButtonElement;
-  toggleButton.addEventListener('click', () => {
+
+  // Check if actions container already exists
+  let actionsContainer = resultsHeader.querySelector('.results-actions') as HTMLDivElement;
+  if (!actionsContainer) {
+    // Create actions container and move toggle button into it
+    actionsContainer = document.createElement('div');
+    actionsContainer.className = 'results-actions';
+
+    // Create download button
+    const downloadButton = document.createElement('button');
+    downloadButton.className = 'download-button';
+    downloadButton.id = 'download-results';
+    downloadButton.title = 'Download results as CSV';
+    downloadButton.appendChild(createDownloadIcon());
+
+    // Move toggle button into actions container
+    actionsContainer.appendChild(downloadButton);
+    actionsContainer.appendChild(toggleButton);
+    resultsHeader.appendChild(actionsContainer);
+  }
+
+  // Update download button click handler
+  const downloadButton = document.getElementById('download-results') as HTMLButtonElement;
+  if (downloadButton) {
+    // Remove old event listeners by replacing the element
+    const newDownloadButton = downloadButton.cloneNode(true) as HTMLButtonElement;
+    newDownloadButton.innerHTML = '';
+    newDownloadButton.appendChild(createDownloadIcon());
+    downloadButton.parentNode?.replaceChild(newDownloadButton, downloadButton);
+
+    // Disable download button if there's an error or no results
+    if (response.error || response.results.length === 0) {
+      newDownloadButton.disabled = true;
+      newDownloadButton.style.opacity = '0.5';
+      newDownloadButton.style.cursor = 'not-allowed';
+      newDownloadButton.title = 'No results to download';
+    } else {
+      newDownloadButton.disabled = false;
+      newDownloadButton.style.opacity = '1';
+      newDownloadButton.style.cursor = 'pointer';
+      newDownloadButton.title = 'Download results as CSV';
+
+      newDownloadButton.onclick = async () => {
+        if (lastQueryRequest) {
+          try {
+            await api.exportQueryResults(lastQueryRequest);
+          } catch (error) {
+            displayError(error instanceof Error ? error.message : 'Failed to export results');
+          }
+        }
+      };
+    }
+  }
+
+  // Initialize toggle button (remove old listeners)
+  const newToggleButton = toggleButton.cloneNode(true) as HTMLButtonElement;
+  toggleButton.parentNode?.replaceChild(newToggleButton, toggleButton);
+  newToggleButton.addEventListener('click', () => {
     resultsContainer.style.display = resultsContainer.style.display === 'none' ? 'block' : 'none';
-    toggleButton.textContent = resultsContainer.style.display === 'none' ? 'Show' : 'Hide';
+    newToggleButton.textContent = resultsContainer.style.display === 'none' ? 'Show' : 'Hide';
   });
 }
 
@@ -250,49 +313,99 @@ function createResultsTable(results: Record<string, any>[], columns: string[]): 
   return table;
 }
 
+// Create download icon SVG
+function createDownloadIcon(): SVGSVGElement {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '2');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+
+  // Arrow pointing down
+  const path1 = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path1.setAttribute('d', 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4');
+  svg.appendChild(path1);
+
+  const polyline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+  polyline.setAttribute('points', '7 10 12 15 17 10');
+  svg.appendChild(polyline);
+
+  const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  line.setAttribute('x1', '12');
+  line.setAttribute('y1', '15');
+  line.setAttribute('x2', '12');
+  line.setAttribute('y2', '3');
+  svg.appendChild(line);
+
+  return svg;
+}
+
 // Display tables
 function displayTables(tables: TableSchema[]) {
   const tablesList = document.getElementById('tables-list') as HTMLDivElement;
-  
+
   if (tables.length === 0) {
     tablesList.innerHTML = '<p class="no-tables">No tables loaded. Upload data or use sample data to get started.</p>';
     return;
   }
-  
+
   tablesList.innerHTML = '';
-  
+
   tables.forEach(table => {
     const tableItem = document.createElement('div');
     tableItem.className = 'table-item';
-    
+
     // Header section
     const tableHeader = document.createElement('div');
     tableHeader.className = 'table-header';
-    
+
     const tableLeft = document.createElement('div');
     tableLeft.style.display = 'flex';
     tableLeft.style.alignItems = 'center';
     tableLeft.style.gap = '1rem';
-    
+
     const tableName = document.createElement('div');
     tableName.className = 'table-name';
     tableName.textContent = table.name;
-    
+
     const tableInfo = document.createElement('div');
     tableInfo.className = 'table-info';
     tableInfo.textContent = `${table.row_count} rows, ${table.columns.length} columns`;
-    
+
     tableLeft.appendChild(tableName);
     tableLeft.appendChild(tableInfo);
-    
+
+    // Action buttons container
+    const tableActions = document.createElement('div');
+    tableActions.className = 'table-actions';
+
+    // Download button
+    const downloadButton = document.createElement('button');
+    downloadButton.className = 'download-button';
+    downloadButton.title = 'Download as CSV';
+    downloadButton.appendChild(createDownloadIcon());
+    downloadButton.onclick = async () => {
+      try {
+        await api.exportTable(table.name);
+      } catch (error) {
+        displayError(error instanceof Error ? error.message : 'Failed to export table');
+      }
+    };
+
+    // Remove button
     const removeButton = document.createElement('button');
     removeButton.className = 'remove-table-button';
     removeButton.innerHTML = '&times;';
     removeButton.title = 'Remove table';
     removeButton.onclick = () => removeTable(table.name);
-    
+
+    tableActions.appendChild(downloadButton);
+    tableActions.appendChild(removeButton);
+
     tableHeader.appendChild(tableLeft);
-    tableHeader.appendChild(removeButton);
+    tableHeader.appendChild(tableActions);
     
     // Columns section
     const tableColumns = document.createElement('div');
